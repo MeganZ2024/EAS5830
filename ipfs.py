@@ -1,42 +1,49 @@
 import json
 import requests
 
-INFURA_API = "https://ipfs.infura.io:5001"
+# 1. READ CONFIGURATION (Public Gateway - No Auth Required)
+PUBLIC_GATEWAY = "https://cloudflare-ipfs.com/ipfs"
+# Alternative: "https://ipfs.io/ipfs"
 
-# Replace these with your actual credentials from the Infura Dashboard
-INFURA_PROJECT_ID = "YOUR_INFURA_PROJECT_ID"
-INFURA_PROJECT_SECRET = "YOUR_INFURA_PROJECT_SECRET"
-AUTH = (INFURA_PROJECT_ID, INFURA_PROJECT_SECRET)
+# 2. WRITE CONFIGURATION (Pinata Free Tier)
+# Sign up at https://www.pinata.cloud/ to get your free JWT token
+PINATA_JWT = "PASTE_YOUR_PINATA_JWT_TOKEN_HERE"
 
 
 def pin_to_ipfs(data):
     assert isinstance(data, dict), "Error pin_to_ipfs expects a dictionary"
 
-    json_bytes = json.dumps(data, separators=(",", ":")).encode("utf-8")
-    files = {"file": ("data.json", json_bytes, "application/json")}
+    # Pinata API endpoint for pinning JSON directly
+    url = "https://api.pinata.cloud/pinning/pinJSONToIPFS"
 
-    # Added the 'auth' parameter here
-    response = requests.post(
-        f"{INFURA_API}/api/v0/add", files=files, auth=AUTH
-    )
+    headers = {
+        "Authorization": f"Bearer {PINATA_JWT}",
+        "Content-Type": "application/json",
+    }
+
+    payload = {"pinataContent": data, "pinataMetadata": {"name": "data.json"}}
+
+    response = requests.post(url, json=payload, headers=headers)
     response.raise_for_status()
 
     result = response.json()
-    return result["Hash"]
+    # Pinata returns the CID under the key "IpfsHash"
+    return result["IpfsHash"]
 
 
 def get_from_ipfs(cid, content_type="json"):
     assert isinstance(cid, str), "get_from_ipfs accepts a cid in the form of a string"
 
-    params = {"arg": cid}
+    # Clean up the CID to ensure it appends cleanly to the gateway URL
+    cid = cid.strip("/")
 
-    # Added the 'auth' parameter here
-    response = requests.post(
-        f"{INFURA_API}/api/v0/cat", params=params, auth=AUTH
-    )
+    # Fetch directly from a wide-open public gateway using a standard GET request
+    url = f"{PUBLIC_GATEWAY}/{cid}"
+
+    response = requests.get(url)
     response.raise_for_status()
 
-    data = json.loads(response.text)
+    data = response.json()
     assert isinstance(data, dict), "get_from_ipfs should return a dict"
 
     return data
