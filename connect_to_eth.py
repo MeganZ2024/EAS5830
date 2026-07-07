@@ -9,7 +9,8 @@ def connect_to_eth():
     Connect to Ethereum Mainnet.
     """
     # 备选的高可用公共主网节点，你也可以换成自己的 Alchemy 链接: f"https://eth-mainnet.g.alchemy.com/v2/{YOUR_API_KEY}"
-    url = "https://cloudflare-eth.com" 
+    # 推荐使用 llamaNodes 或 Flashbots 节点，它们对自动化脚本的并发请求支持极好，不会报内部错误
+    url = "https://eth.llamarpc.com" 
     
     try:
         # 加上 timeout 防止被评测机卡死
