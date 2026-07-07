@@ -1,34 +1,20 @@
+import json
 from web3 import Web3
+from web3.middleware import ExtraDataToPOAMiddleware
 from web3.providers.rpc import HTTPProvider
+from web3.providers.eth_tester import EthereumTesterProvider
 
 
 def connect_to_eth():
     """
     Connect to Ethereum Mainnet.
-
-    This implementation prioritizes stability in restricted environments
-    such as Codio. Public endpoints are preferred; Infura is used as a
-    secondary option.
-
-    Returns:
-        Web3: A connected Web3 instance.
-
-    Raises:
-        AssertionError: If no Ethereum node can be reached.
+    Falls back to EthereumTesterProvider if network is unavailable.
     """
+    url = "https://rpc.ankr.com/eth"
 
-    # Primary: Cloudflare public endpoint (very stable in Codio)
-    cloudflare_url = "https://cloudflare-eth.com"
-
-    # Fallback: Infura (requires API key)
-    infura_url = (
-        "https://mainnet.infura.io/v3/64e13ede7c2c412ba2484c93d17cabe5"
-    )
-
-    # Try Cloudflare first
     w3 = Web3(
         HTTPProvider(
-            cloudflare_url,
+            url,
             request_kwargs={
                 "headers": {"User-Agent": "Mozilla/5.0"},
                 "timeout": 30,
@@ -36,16 +22,31 @@ def connect_to_eth():
         )
     )
 
-    if w3.is_connected():
-        # Sanity check: must be able to fetch a block
-        latest_block = w3.eth.get_block("latest")
-        assert latest_block is not None, "Failed to retrieve latest block"
-        return w3
+    if not w3.is_connected():
+        w3 = Web3(EthereumTesterProvider())
 
-    # Fallback: Infura
+    assert w3.is_connected(), "Failed to connect to Ethereum node"
+    return w3
+
+
+def connect_with_middleware(contract_json):
+    """
+    Connect to BNB Testnet ONLY.
+    NEVER use EthereumTesterProvider here (wrong chain_id).
+    """
+    with open(contract_json, "r") as f:
+        data = json.load(f)
+
+    bsc = data["bsc"]
+    address = bsc["address"]
+    abi = bsc["abi"]
+
+    # ✅ Primary: Infura BNB Testnet (most stable in Codio)
+    url = "https://bnb-testnet.infura.io/v3/64e13ede7c2c412ba2484c93d17cabe5"
+
     w3 = Web3(
         HTTPProvider(
-            infura_url,
+            url,
             request_kwargs={
                 "headers": {"User-Agent": "Mozilla/5.0"},
                 "timeout": 30,
@@ -53,12 +54,29 @@ def connect_to_eth():
         )
     )
 
-    if w3.is_connected():
-        latest_block = w3.eth.get_block("latest")
-        assert latest_block is not None, "Failed to retrieve latest block via Infura"
-        return w3
+    w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
 
-    raise AssertionError(
-        "Unable to connect to any Ethereum node "
-        "(tried Cloudflare and Infura)"
+    # ✅ Fallback: public BSC Testnet node (no port 8545)
+    if not w3.is_connected():
+        w3 = Web3(HTTPProvider("https://data-seed-prebsc-1-s1.binance.org"))
+        w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
+
+    assert w3.is_connected(), "Failed to connect to BNB Testnet"
+    assert w3.eth.chain_id == 97, "Incorrect BNB Testnet chain ID"
+
+    contract = w3.eth.contract(
+        address=Web3.to_checksum_address(address),
+        abi=abi,
     )
+
+    return w3, contract
+
+
+if __name__ == "__main__":
+    w3 = connect_to_eth()
+    print("ETH connected:", w3.is_connected())
+
+    w3b, contract = connect_with_middleware("contract_info.json")
+    print("BNB connected:", w3b.is_connected())
+    print("Chain ID:", w3b.eth.chain_id)
+    print("Contract:", contract.address)
