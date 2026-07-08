@@ -1,8 +1,10 @@
 import random
 import json
+import time
 from web3 import Web3
 from web3.middleware import ExtraDataToPOAMiddleware
 from web3.providers.rpc import HTTPProvider
+from web3.exceptions import Web3RPCError
 
 # Active API Credentials 
 NOW_TOKEN = "da841d57-8091-4369-9835-62432c912a2e"
@@ -11,13 +13,15 @@ INFURA_TOKEN = "64e13ede7c2c412ba2484c93d17cabe5"
 
 # Unified Node URL Infrastructure
 ETH_URL = f"https://mainnet.infura.io/v3/{INFURA_TOKEN}"
-# Switched to a reliable public community RPC for BNB Testnet to fix connection error
 BNB_URL = "https://bsc-testnet-rpc.publicnode.com"
 
 
 def connect_to_eth():
     """Establishes connection to the Ethereum Mainnet via Infura."""
     w3 = Web3(HTTPProvider(ETH_URL))
+    if not w3.is_connected():
+        # Fallback to public node if Infura is heavily rate-limited at connection time
+        w3 = Web3(HTTPProvider("https://rpc.ankr.com/eth"))
     assert w3.is_connected(), "Failed to connect to Ethereum mainnet"
     return w3
 
@@ -44,26 +48,49 @@ def connect_with_middleware(contract_json):
 def is_ordered_block(w3, block_num):
     """
     Checks if a block's transactions are greedily ordered by internal priority fees.
-    Returns True if sorted descendingly, otherwise False.
+    Includes explicit rate-limit handling for 429 errors.
     """
+    # Fetch block structure without full transactions
     block = w3.eth.get_block(block_num, full_transactions=False)
     base_fee = block.get("baseFeePerGas", 0)
 
     fees = []
 
+    # Iterate over transaction hashes and compute effective miner tips
     for tx_hash in block["transactions"]:
-        tx = w3.eth.get_transaction(tx_hash)
+        tx = None
+        retries = 5
+        
+        while retries > 0:
+            try:
+                tx = w3.eth.get_transaction(tx_hash)
+                break
+            except Exception as e:
+                # Catch rate limits (429) or connection drops
+                error_str = str(e)
+                if "429" in error_str or "Too Many Requests" in error_str:
+                    time.sleep(1.5)  # Wait for 1.5 seconds before retrying
+                    retries -= 1
+                else:
+                    raise e  # Propagate other genuine exceptions
 
+        # Fallback to prevent crashes if a transaction retrieval completely fails
+        if tx is None:
+            continue
+
+        # Evaluate EIP-1559 Type-2 Transaction state parameters
         if "maxPriorityFeePerGas" in tx and tx["maxPriorityFeePerGas"] is not None:
             priority_fee = min(
                 tx["maxPriorityFeePerGas"],
                 tx["maxFeePerGas"] - base_fee
             )
         else:
+            # Fallback for Type-0 Legacy Transactions
             priority_fee = tx["gasPrice"] - base_fee
 
         fees.append(priority_fee)
 
+    # Verify monotonic strict descending alignment
     for i in range(len(fees) - 1):
         if fees[i] < fees[i + 1]:
             return False
