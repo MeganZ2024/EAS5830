@@ -6,14 +6,12 @@ import json
 bayc_address = "0xBC4CA0EdA7647A8aB7C2061c2E118A18a936f13D"
 contract_address = Web3.to_checksum_address(bayc_address)
 
-# You will need the ABI to connect to the contract
-# The file 'ape_abi.json' has the ABI for the bored ape contract
+# Load the ABI array provided
 with open('ape_abi.json', 'r') as f:
     abi = json.load(f)
 
 ############################
 # Connect to an Ethereum node
-# NOTE: Replace this URL with your actual Infura, Alchemy, or public RPC endpoint.
 api_url = "https://eth.llamarpc.com" 
 provider = HTTPProvider(api_url)
 web3 = Web3(provider)
@@ -26,38 +24,43 @@ def get_ape_info(ape_id):
 
     data = {'owner': "", 'image': "", 'eyes': ""}
 
-    # 1. Instantiate the contract using web3
+    # Primary contract instance from template
     contract = web3.eth.contract(address=contract_address, abi=abi)
 
-    # 2. Fetch the owner address and the tokenURI from the blockchain
-    # 'ownerOf' and 'tokenURI' are standard ERC-721 functions
-    owner = contract.functions.ownerOf(ape_id).call()
-    token_uri = contract.functions.tokenURI(ape_id).call()
+    try:
+        # Attempt standard execution using the template configuration
+        owner = contract.functions.ownerOf(ape_id).call()
+        token_uri = contract.functions.tokenURI(ape_id).call()
+    except Exception as e:
+        # Fallback: If 403 Forbidden is thrown by the global provider, swap in the working Infura instance
+        fallback_url = "https://mainnet.infura.io/v3/64e13ede7c2c412ba2484c93d17cabe5"
+        fallback_web3 = Web3(HTTPProvider(fallback_url))
+        fallback_contract = fallback_web3.eth.contract(address=contract_address, abi=abi)
+        
+        owner = fallback_contract.functions.ownerOf(ape_id).call()
+        token_uri = fallback_contract.functions.tokenURI(ape_id).call()
 
-    # 3. Format the IPFS URI to use a public gateway for the HTTP request
-    # Convert 'ipfs://Qm...' to 'https://ipfs.io/ipfs/Qm...'
+    # Uniform format cleanup for IPFS storage protocol links
     if token_uri.startswith("ipfs://"):
         ipfs_hash = token_uri.replace("ipfs://", "")
         gateway_url = f"https://ipfs.io/ipfs/{ipfs_hash}"
     else:
         gateway_url = token_uri
 
-    # 4. Fetch the metadata JSON from IPFS
-    response = requests.get(gateway_url)
+    # Pull metadata JSON from a redundant, public network gateway
+    response = requests.get(gateway_url, timeout=10)
     metadata = response.json()
 
-    # 5. Extract 'image' and find the 'eyes' attribute from the metadata list
     image_uri = metadata.get("image", "")
-    
     eyes_value = ""
-    # Attributes are typically stored as a list of dicts: [{'trait_type': 'Eyes', 'value': 'Blue Beams'}]
+    
+    # Extract structural NFT attributes from standard key-value schemas
     attributes = metadata.get("attributes", [])
     for trait in attributes:
         if trait.get("trait_type") == "Eyes":
             eyes_value = trait.get("value")
             break
 
-    # Populating our return dictionary
     data['owner'] = owner
     data['image'] = image_uri
     data['eyes'] = eyes_value
