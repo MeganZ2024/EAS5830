@@ -5,58 +5,55 @@ from eth_account import Account
 from eth_account.messages import encode_defunct
 import random
 
-# --- Robust Middleware Fallback Layer for web3.py v6 vs v7+ ---
+# --- Compatibility Layer for web3.py v6 vs v7+ ---
 try:
     from web3.middleware import ExtraDataToPOAMiddleware as poa_middleware
 except ImportError:
     from web3.middleware import geth_poa_middleware as poa_middleware
 
-def sign_challenge(challenge):
+def sign_challenge( challenge ):
     w3 = Web3()
-    
-    # Securely reference your generated course account private key
+
+    # Your persistent course private key string
     sk = "0x0b230bc657981618781e18fdea1bcfd998416cae18bf957630e7c78330a8979f"
-    
+
     acct = w3.eth.account.from_key(sk)
-    
-    # EIP-191 compliant message signing required by the autograder challenge
-    if isinstance(challenge, bytes):
-        message = encode_defunct(primitive=challenge)
-    else:
-        message = encode_defunct(text=str(challenge))
-        
-    signed_message = w3.eth.account.sign_message(message, private_key=acct.key)
+
+    # CRITICAL FIX: Direct signature without redundant wrapping
+    signed_message = w3.eth.account.sign_message( challenge, private_key = acct.key )
+
     return acct.address, signed_message.signature
 
 
 def verify_sig():
     """
-    Simulates the exact verification sequence utilized by the autograder.
+    Simulates the exact verification flow executed by the autograder.
     """
     challenge_bytes = random.randbytes(32)
     challenge = encode_defunct(challenge_bytes)
-    address, sig = sign_challenge(challenge_bytes)
+    address, sig = sign_challenge( challenge )
 
     w3 = Web3()
-    return w3.eth.account.recover_message(challenge, signature=sig) == address
+    return w3.eth.account.recover_message( challenge , signature=sig ) == address
 
 
-def mint_mcit_token():
+def mint_nft_on_chain():
     """
-    Interacts with the current MCIT Token Contract to ensure the address holds an asset.
+    Connects to Avalanche Fuji, brute-forces a nonce for Token ID 0 or 1, and mints it.
     """
     RPC_URL = "https://api.avax-test.network/ext/bc/C/rpc"
     w3 = Web3(Web3.HTTPProvider(RPC_URL))
     w3.middleware_onion.inject(poa_middleware, layer=0)
     
     if not w3.is_connected():
-        print("[-] RPC connection to Avalanche Fuji failed.")
+        print("[-] RPC connection failed.")
         return False
 
     sk = "0x0b230bc657981618781e18fdea1bcfd998416cae18bf957630e7c78330a8979f"
     account = Account.from_key(sk)
+    contract_address = "0x85ac2e065d4526FBeE6a2253389669a12318A412"
     
-    # Absolute path targeting the provided ABI descriptor
+    # Resolve the correct directory path for the ABI file
     base_dir = "/home/codio/workspace/.guides/student_code/EAS5830"
     abi_filename = os.path.join(base_dir, "nft.abi")
     if not os.path.exists(abi_filename):
@@ -66,43 +63,29 @@ def mint_mcit_token():
         with open(abi_filename, "r") as f:
             abi = json.load(f)
     except Exception as e:
-        print(f"[-] Missing or unreadable ABI layout: {e}")
+        print(f"[-] Failed to load ABI file: {e}")
         return False
 
-    # Target contract instance
-    contract_address = "0x85ac2e065d4526FBeE6a2253389669a12318A412"
     contract = w3.eth.contract(address=contract_address, abi=abi)
 
-    # Inspect current inventory status
     try:
-        balance = contract.functions.balanceOf(account.address).call()
-        print(f"[+] Current contract asset balance: {balance}")
-        if balance > 0:
-            print("[+] Wallet already satisfies ownership check criteria.")
-            return True
-    except Exception as e:
-        print(f"[-] Failed to execute balance verification: {e}")
+        max_id = contract.functions.maxId().call()
+    except Exception:
+        max_id = 10000
 
-    # Inspect the ABI to find the correct write function name designated for minting
-    # Common ERC-721 mint selectors: 'mint', 'mintNFT', 'requestToken', or 'claim'
-    function_names = [f['name'] for f in abi if f.get('type') == 'function']
-    print(f"[+] Found available contract functions: {function_names}")
-    
-    # Dynamically resolve structural parameters for the target call
-    print("[+] Submitting transaction to on-chain contract...")
+    # Brute force the absolute minimum global Token ID (0 or 1) locally
+    print("[+] Locally hunting for an optimized nonce targeting Token ID 0 or 1...")
+    while True:
+        nonce_bytes = os.urandom(32)
+        hashed = Web3.solidity_keccak(['bytes32'], [nonce_bytes])
+        predicted_id = int.from_bytes(hashed, byteorder='big') % max_id
+        if predicted_id in [0, 1]:
+            print(f"[+] Match found! Target Token ID: {predicted_id}")
+            break
+
+    print("[+] Constructing and sending on-chain claim transaction...")
     try:
-        # Defaults to 'claim' variant matching the provided contract metadata rules
-        if 'claim' in function_names:
-            # Generate valid pseudo-random bytes32 variable parameters matching the interface
-            nonce_bytes = os.urandom(32)
-            tx_builder = contract.functions.claim(account.address, nonce_bytes)
-        elif 'mint' in function_names:
-            tx_builder = contract.functions.mint(account.address)
-        else:
-            print("[-] Standard entry-point execution method unrecognized in ABI description.")
-            return False
-
-        tx = tx_builder.build_transaction({
+        tx = contract.functions.claim(account.address, nonce_bytes).build_transaction({
             'from': account.address,
             'nonce': w3.eth.get_transaction_count(account.address),
             'gasPrice': w3.eth.gas_price,
@@ -111,25 +94,26 @@ def mint_mcit_token():
         
         signed_tx = w3.eth.account.sign_transaction(tx, private_key=sk)
         tx_hash = w3.eth.send_raw_transaction(signed_tx.rawTransaction)
-        print(f"[+] Tx submitted to network. Hash: {tx_hash.hex()}")
+        print(f"[+] Broadcast successful. Transaction Hash: {tx_hash.hex()}")
         
         receipt = w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
         if receipt.status == 1:
-            print(f"[+] Asset successfully minted in block: {receipt.blockNumber}")
+            print(f"[+] NFT successfully minted in block {receipt.blockNumber}!")
             return True
-        print("[-] Blockchain transaction reverted.")
-        return False
-    except Exception as tx_err:
-        print(f"[-] Transmission error encountered: {tx_err}")
+        else:
+            print("[-] Transaction reverted. The Token ID might have been taken. Please retry.")
+            return False
+    except Exception as tx_error:
+        print(f"[-] Transaction failed: {tx_error}")
         return False
 
 
 if __name__ == '__main__':
-    print("--- Step 1: Processing Account Token Inventory Configuration ---")
-    mint_nft_on_chain = mint_mcit_token()
+    print("--- Step 1: Claiming/Minting NFT on Avalanche Fuji ---")
+    mint_nft_on_chain()
     
-    print("\n--- Step 2: Running Challenge Authentication Pass ---")
+    print("\n--- Step 2: Running Cryptographic Signature Challenge ---")
     if verify_sig():
-        print("You passed the local cryptographic challenge!")
+        print("You passed the challenge!")
     else:
-        print("You failed the cryptographic challenge!")
+        print("You failed the challenge!")
