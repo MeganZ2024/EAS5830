@@ -60,13 +60,27 @@ def sign_message(challenge, filename="secret_key.txt"):
     sig, addr = sign_message(challenge=challenge, filename=sk_filepath)
     
     Returns:
-        tuple: (signature_hex, eth_addr) matching the order expected by the autograder unpacking assignment.
+        tuple: (signed_message_object, eth_addr) 
+        where signed_message_object has the '.signature' attribute needed by validate.py.
     """
-    # Simply unpack and route through the robust verification logic in get_keys
-    eth_addr, signature_hex = get_keys(challenge=challenge, filename=filename)
+    # Read the existing private key securely
+    with open(filename, "r") as f:
+        private_key = f.readline().strip()
+        
+    account = Account.from_key(private_key)
+    eth_addr = account.address
+
+    # Encode the message properly
+    if isinstance(challenge, bytes):
+        message = encode_defunct(primitive=challenge)
+    else:
+        message = encode_defunct(text=str(challenge))
+        
+    # Generate the actual SignedMessage object instead of a string
+    signed_message_object = Account.sign_message(message, private_key=private_key)
     
-    # Return order matching: sig, addr = sign_message(...)
-    return signature_hex, eth_addr
+    # Return (Object, String) to perfectly match 'sig, addr' assignment unpacking
+    return signed_message_object, eth_addr
 
 
 if __name__ == "__main__":
