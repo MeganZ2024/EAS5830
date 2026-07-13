@@ -19,7 +19,7 @@ def sign_challenge( challenge ):
 
     acct = w3.eth.account.from_key(sk)
 
-    # CRITICAL FIX: Direct signature without redundant wrapping
+    # Clean execution: Direct signature to prevent double-wrapping errors
     signed_message = w3.eth.account.sign_message( challenge, private_key = acct.key )
 
     return acct.address, signed_message.signature
