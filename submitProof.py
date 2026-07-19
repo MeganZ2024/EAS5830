@@ -36,9 +36,9 @@ def merkle_assignment():
 
     if sign_challenge_verify(challenge, addr, sig):
         tx_hash = '0x'
-        # Complete this method and run your code with the following line un-commented
+        # Send the proof to the contract to claim the prime
         tx_hash = send_signed_msg(proof, leaves[random_leaf_index])
-        print(f"Transaction submitted! Hash: {tx_hash}")
+        print(f"Transaction successfully submitted! Hash: {tx_hash}")
 
 
 def generate_primes(num_primes):
@@ -83,7 +83,6 @@ def build_merkle(leaves):
     while len(current_level) > 1:
         next_level = []
         for i in range(0, len(current_level), 2):
-            # If there's an odd number of elements, pair the last element with itself
             if i + 1 < len(current_level):
                 parent_hash = hash_pair(current_level[i], current_level[i+1])
             else:
@@ -100,26 +99,22 @@ def prove_merkle(merkle_tree, random_indx):
         Takes a random_index to create a proof of inclusion for and a complete Merkle tree
         as a list of lists where index 0 is the list of leaves, index 1 is the list of
         parent hash values, up to index -1 which is the list of the root hash.
-        returns a proof of inclusion as list of values (hex strings or bytes)
+        returns a proof of inclusion as list of values
     """
     merkle_proof = []
     idx = random_indx
     
-    # Iterate through all levels except the root level
     for level in merkle_tree[:-1]:
-        # Determine if the index is even or odd to find its sibling
         if idx % 2 == 0:
-            # Sibling is to the right
             if idx + 1 < len(level):
                 sibling = level[idx + 1]
             else:
-                sibling = level[idx]  # Pair with itself if no right sibling exists
+                sibling = level[idx]
         else:
-            # Sibling is to the left
             sibling = level[idx - 1]
             
         merkle_proof.append(sibling)
-        idx //= 2  # Move to the parent index for the next level
+        idx //= 2
         
     return merkle_proof
 
@@ -135,7 +130,6 @@ def sign_challenge(challenge):
     acct = get_account()
     addr = acct.address
 
-    # Encode the message using the EIP-191 standard (Defunct prefix matches eth_sign format)
     eth_encoded_msg = eth_account.messages.encode_defunct(text=challenge)
     eth_sig_obj = acct.sign_message(eth_encoded_msg)
 
@@ -156,12 +150,12 @@ def send_signed_msg(proof, random_leaf):
 
     contract = w3.eth.contract(address=contract_address, abi=abi)
     
-    # Convert proof items into hex format strings if required by web3.py contract wrappers
-    formatted_proof = [p.hex() if isinstance(p, bytes) else p for p in proof]
-    formatted_leaf = random_leaf.hex() if isinstance(random_leaf, bytes) else random_leaf
+    # Strictly ensure components are passed as pure bytes arrays so 
+    # web3.py correctly matches the submit(bytes32[], bytes32) Solidity interface.
+    formatted_proof = [bytes(p) if isinstance(p, str) else p for p in proof]
+    formatted_leaf = bytes.fromhex(random_leaf[2:]) if isinstance(random_leaf, str) else random_leaf
 
-    # Build the transaction using the contract's "submit" method
-    # Note: Check your specific contract ABI if the function is lowercase 'submit'
+    # Build transaction dictionary
     tx = contract.functions.submit(formatted_proof, formatted_leaf).build_transaction({
         'from': acct.address,
         'nonce': w3.eth.get_transaction_count(acct.address),
@@ -169,10 +163,10 @@ def send_signed_msg(proof, random_leaf):
         'chainId': w3.eth.chain_id
     })
     
-    # Estimate gas to prevent out-of-gas errors
+    # Calculate appropriate gas limits
     tx['gas'] = int(w3.eth.estimate_gas(tx) * 1.2)
 
-    # Sign and broadcast the transaction
+    # Sign transaction payload
     signed_tx = acct.sign_transaction(tx)
     tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
 
