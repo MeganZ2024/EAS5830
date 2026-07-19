@@ -38,7 +38,7 @@ def merkle_assignment():
         tx_hash = '0x'
         # Send the proof to the contract to claim the prime
         tx_hash = send_signed_msg(proof, leaves[random_leaf_index])
-        print(f"Transaction successfully submitted! Hash: {tx_hash}")
+        print(f"Transaction successfully mined and confirmed! Hash: {tx_hash}")
 
 
 def generate_primes(num_primes):
@@ -169,6 +169,10 @@ def send_signed_msg(proof, random_leaf):
     # Sign transaction payload
     signed_tx = acct.sign_transaction(tx)
     tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
+
+    # Wait for the transaction block to be mined on-chain before letting the script end
+    print("Waiting for transaction confirmation on the network...")
+    w3.eth.wait_for_transaction_receipt(tx_hash)
 
     return tx_hash.hex()
 
