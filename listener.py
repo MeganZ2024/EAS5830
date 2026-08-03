@@ -49,69 +49,48 @@ def scan_blocks(chain, start_block, end_block, contract_address, eventfile='depo
     
     contract = w3.eth.contract(address=contract_address, abi=DEPOSIT_ABI)
 
-    # Handle "latest" block specifications
+    # 4. Handle integer conversion to avoid string injection RPC errors
     if start_block == "latest":
         start_block = w3.eth.get_block_number()
+    else:
+        start_block = int(start_block)  # <--- CRITICAL FIX
+
     if end_block == "latest":
         end_block = w3.eth.get_block_number()
+    else:
+        end_block = int(end_block)      # <--- CRITICAL FIX
 
     if end_block < start_block:
-        print(f"Error: end_block < start_block!")
-        print(f"end_block = {end_block}")
-        print(f"start_block = {start_block}")
+        print(f"Error: end_block ({end_block}) < start_block ({start_block})!")
         return
-
-    if start_block == end_block:
-        print(f"Scanning block {start_block} on {chain}")
-    else:
-        print(f"Scanning blocks {start_block} - {end_block} on {chain}")
 
     events_list = []
 
-    # Get event topic signature hash
-    deposit_event_abi = contract.events.Deposit().abi
-    event_topic = w3.keccak(text="Deposit(address,address,uint256)").hex()
+    # 5. Fetch logs natively across the entire range (NO FOR LOOP)
+    # The assignment specifically instructs not to loop moderately small ranges.
+    events = contract.events.Deposit.get_logs(from_block=start_block, to_block=end_block)
 
-    def fetch_and_process_logs(f_block, t_block):
-        # Format block numbers as hex strings starting with '0x' for the RPC node
-        hex_f_block = hex(f_block) if isinstance(f_block, int) else f_block
-        hex_t_block = hex(t_block) if isinstance(t_block, int) else t_block
+    for evt in events:
+        # Standardize transaction hash
+        if hasattr(evt.transactionHash, 'hex'):
+            tx_hash = evt.transactionHash.hex()
+        else:
+            tx_hash = str(evt.transactionHash)
 
-        # Fetch raw logs via w3.eth.get_logs
-        raw_logs = w3.eth.get_logs({
-            'fromBlock': hex_f_block,
-            'toBlock': hex_t_block,
-            'address': contract_address,
-            'topics': [event_topic]
-        })
+        if not tx_hash.startswith("0x"):
+            tx_hash = "0x" + tx_hash
 
-        for log in raw_logs:
-            # Decode the raw log into event arguments
-            decoded_event = contract.events.Deposit().process_log(log)
-            
-            # Format transaction hash to guaranteed 0x-prefixed hex string
-            tx_hash = decoded_event.transactionHash.hex()
-            if not tx_hash.startswith("0x"):
-                tx_hash = "0x" + tx_hash
+        data = {
+            'chain': chain,
+            'token': evt.args['token'],
+            'recipient': evt.args['recipient'],
+            'amount': evt.args['amount'],
+            'transactionHash': tx_hash,
+            'address': evt.address
+        }
+        events_list.append(data)
 
-            data = {
-                'chain': chain,
-                'token': decoded_event.args['token'],
-                'recipient': decoded_event.args['recipient'],
-                'amount': decoded_event.args['amount'],
-                'transactionHash': tx_hash,
-                'address': decoded_event.address
-            }
-            events_list.append(data)
-
-    # 4. Fetch logs across requested block range
-    if end_block - start_block < 30:
-        fetch_and_process_logs(start_block, end_block)
-    else:
-        for block_num in range(start_block, end_block + 1):
-            fetch_and_process_logs(block_num, block_num)
-
-    # 5. Export to deposit_logs.csv
+    # 6. Export to deposit_logs.csv
     csv_path = Path(eventfile)
     headers = ['chain', 'token', 'recipient', 'amount', 'transactionHash', 'address']
 
