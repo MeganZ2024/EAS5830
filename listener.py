@@ -9,8 +9,8 @@ import pandas as pd
 def scan_blocks(chain, start_block, end_block, contract_address, eventfile='deposit_logs.csv'):
     """
     chain - string (Either 'bsc' or 'avax')
-    start_block - integer or "latest" first block to scan
-    end_block - integer or "latest" last block to scan
+    start_block - integer/string or "latest" first block to scan
+    end_block - integer/string or "latest" last block to scan
     contract_address - the address of the deployed contract
 
     Scans specified blocks for "Deposit" events and saves them to deposit_logs.csv.
@@ -49,16 +49,16 @@ def scan_blocks(chain, start_block, end_block, contract_address, eventfile='depo
     
     contract = w3.eth.contract(address=contract_address, abi=DEPOSIT_ABI)
 
-    # 4. Handle integer conversion to avoid string injection RPC errors
+    # 4. Strictly handle string-to-int conversion for block parameters
     if start_block == "latest":
         start_block = w3.eth.get_block_number()
     else:
-        start_block = int(start_block)  # <--- CRITICAL FIX
+        start_block = int(start_block)  
 
     if end_block == "latest":
         end_block = w3.eth.get_block_number()
     else:
-        end_block = int(end_block)      # <--- CRITICAL FIX
+        end_block = int(end_block)
 
     if end_block < start_block:
         print(f"Error: end_block ({end_block}) < start_block ({start_block})!")
@@ -66,29 +66,49 @@ def scan_blocks(chain, start_block, end_block, contract_address, eventfile='depo
 
     events_list = []
 
-    # 5. Fetch logs natively across the entire range (NO FOR LOOP)
-    # The assignment specifically instructs not to loop moderately small ranges.
-    events = contract.events.Deposit.get_logs(from_block=start_block, to_block=end_block)
+    # Get event topic signature hash for low-level fetching
+    event_topic = w3.keccak(text="Deposit(address,address,uint256)").hex()
 
-    for evt in events:
-        # Standardize transaction hash
-        if hasattr(evt.transactionHash, 'hex'):
-            tx_hash = evt.transactionHash.hex()
-        else:
-            tx_hash = str(evt.transactionHash)
+    def fetch_and_process_logs(f_block, t_block):
+        # Format explicitly as hex strings for the EVM RPC node
+        # This completely avoids the "-32602 invalid argument 0" string error
+        raw_logs = w3.eth.get_logs({
+            'fromBlock': hex(f_block),
+            'toBlock': hex(t_block),
+            'address': contract_address,
+            'topics': [event_topic]
+        })
 
-        if not tx_hash.startswith("0x"):
-            tx_hash = "0x" + tx_hash
+        for log in raw_logs:
+            # Decode the raw log into event arguments, ignoring strict internal filters
+            decoded_event = contract.events.Deposit().process_log(log)
+            
+            # Format transaction hash safely
+            if hasattr(decoded_event.transactionHash, 'hex'):
+                tx_hash = decoded_event.transactionHash.hex()
+            else:
+                tx_hash = str(decoded_event.transactionHash)
 
-        data = {
-            'chain': chain,
-            'token': evt.args['token'],
-            'recipient': evt.args['recipient'],
-            'amount': evt.args['amount'],
-            'transactionHash': tx_hash,
-            'address': evt.address
-        }
-        events_list.append(data)
+            if not tx_hash.startswith("0x"):
+                tx_hash = "0x" + tx_hash
+
+            data = {
+                'chain': chain,
+                'token': decoded_event.args['token'],
+                'recipient': decoded_event.args['recipient'],
+                'amount': decoded_event.args['amount'],
+                'transactionHash': tx_hash,
+                'address': decoded_event.address
+            }
+            events_list.append(data)
+
+    # 5. Fetch logs safely handling block ranges
+    if end_block - start_block < 30:
+        fetch_and_process_logs(start_block, end_block)
+    else:
+        # Prevent RPC limits by looping one by one for large ranges
+        for block_num in range(start_block, end_block + 1):
+            fetch_and_process_logs(block_num, block_num)
 
     # 6. Export to deposit_logs.csv
     csv_path = Path(eventfile)
