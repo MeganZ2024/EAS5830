@@ -1,37 +1,33 @@
 import json
 import os
-import pandas as pd
+import time
 from web3 import Web3
 from web3.providers.rpc import HTTPProvider
 from web3.middleware import ExtraDataToPOAMiddleware
 
-BSC_RPCS = [
-    "https://data-seed-prebsc-1-s1.binance.org:8545/",
+# 备用 BSC Testnet RPC 节点列表
+BSC_TESTNET_RPCS = [
     "https://bsc-testnet.publicnode.com",
-    "https://data-seed-prebsc-2-s1.binance.org:8545/"
+    "https://data-seed-prebsc-2-s1.binance.org:8545/",
+    "https://data-seed-prebsc-1-s1.binance.org:8545/",
+    "https://endpoints.omniatech.io/v1/bsc/testnet/public"
 ]
 
-def connect_to(chain):
+FUJI_RPC = "https://api.avax-test.network/ext/bc/C/rpc"
+
+
+def connect_to(chain, rpc_index=0):
     """
     Connect to Avalanche Fuji (source) or BNB Chain Testnet (destination)
     """
     if chain == 'source':
-        api_url = "https://api.avax-test.network/ext/bc/C/rpc"
-        w3 = Web3(HTTPProvider(api_url))
+        w3 = Web3(HTTPProvider(FUJI_RPC))
         w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
         return w3
 
     elif chain == 'destination':
-        for rpc in BSC_RPCS:
-            try:
-                w3 = Web3(HTTPProvider(rpc))
-                if w3.is_connected():
-                    w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
-                    return w3
-            except Exception:
-                continue
-        # Fallback to default
-        w3 = Web3(HTTPProvider(BSC_RPCS[0]))
+        rpc_url = BSC_TESTNET_RPCS[rpc_index % len(BSC_TESTNET_RPCS)]
+        w3 = Web3(HTTPProvider(rpc_url))
         w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
         return w3
 
@@ -47,7 +43,7 @@ def get_contract_info(chain, contract_info_path="contract_info.json"):
             contracts = json.load(f)
         return contracts[chain]
     except Exception as e:
-        print(f"Failed to read contract info\nPlease contact your instructor\n{e}")
+        print(f"Failed to read contract info: {e}")
         return None
 
 
@@ -117,13 +113,32 @@ def send_signed_transaction(w3, contract_function, private_key):
     return receipt
 
 
+def get_logs_with_retry(chain, contract, event_name, from_block, to_block):
+    """
+    针对 RPC 限流/报错（如 -32005 limit exceeded）自动切换节点并重试
+    """
+    for rpc_idx in range(len(BSC_TESTNET_RPCS) if chain == 'destination' else 1):
+        try:
+            w3 = connect_to(chain, rpc_idx)
+            contract_instance = w3.eth.contract(
+                address=contract.address,
+                abi=contract.abi
+            )
+            event_obj = getattr(contract_instance.events, event_name)()
+            logs = event_obj.get_logs(from_block=from_block, to_block=to_block)
+            return w3, logs
+        except Exception as e:
+            print(f"Attempt with RPC index {rpc_idx} failed for {chain} ({e}), retrying next RPC...")
+            time.sleep(0.5)
+
+    # 兜底返回原连接对象及空列表
+    return connect_to(chain), []
+
+
 def scan_blocks(chain, contract_info="contract_info.json"):
     if chain not in ['source', 'destination']:
         print(f"Invalid chain: {chain}")
         return 0
-
-    w3_source = connect_to('source')
-    w3_dest = connect_to('destination')
 
     source_info = get_contract_info('source', contract_info)
     dest_info = get_contract_info('destination', contract_info)
@@ -131,6 +146,9 @@ def scan_blocks(chain, contract_info="contract_info.json"):
     if not source_info or not dest_info:
         print("Error: Could not load contract information.")
         return 0
+
+    w3_source = connect_to('source')
+    w3_dest = connect_to('destination')
 
     source_contract = w3_source.eth.contract(
         address=Web3.to_checksum_address(source_info['address']),
@@ -150,14 +168,7 @@ def scan_blocks(chain, contract_info="contract_info.json"):
         latest_block = w3_source.eth.block_number
         from_block = max(0, latest_block - 4)
 
-        try:
-            deposit_events = source_contract.events.Deposit().get_logs(
-                from_block=from_block,
-                to_block=latest_block
-            )
-        except Exception as e:
-            print(f"Error reading Deposit logs: {e}")
-            deposit_events = []
+        _, deposit_events = get_logs_with_retry('source', source_contract, 'Deposit', from_block, latest_block)
 
         for event in deposit_events:
             args = event.args
@@ -178,14 +189,7 @@ def scan_blocks(chain, contract_info="contract_info.json"):
         latest_block = w3_dest.eth.block_number
         from_block = max(0, latest_block - 4)
 
-        try:
-            unwrap_events = dest_contract.events.Unwrap().get_logs(
-                from_block=from_block,
-                to_block=latest_block
-            )
-        except Exception as e:
-            print(f"Error reading Unwrap logs: {e}")
-            unwrap_events = []
+        _, unwrap_events = get_logs_with_retry('destination', dest_contract, 'Unwrap', from_block, latest_block)
 
         for event in unwrap_events:
             args = event.args
