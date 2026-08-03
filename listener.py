@@ -68,15 +68,19 @@ def scan_blocks(chain, start_block, end_block, contract_address, eventfile='depo
 
     events_list = []
 
-    # Get event topic hash
+    # Get event topic signature hash
     deposit_event_abi = contract.events.Deposit().abi
     event_topic = w3.keccak(text="Deposit(address,address,uint256)").hex()
 
     def fetch_and_process_logs(f_block, t_block):
-        # Fetch raw logs via w3.eth.get_logs using RPC-compatible dict parameters
+        # Format block numbers as hex strings starting with '0x' for the RPC node
+        hex_f_block = hex(f_block) if isinstance(f_block, int) else f_block
+        hex_t_block = hex(t_block) if isinstance(t_block, int) else t_block
+
+        # Fetch raw logs via w3.eth.get_logs
         raw_logs = w3.eth.get_logs({
-            'fromBlock': f_block,
-            'toBlock': t_block,
+            'fromBlock': hex_f_block,
+            'toBlock': hex_t_block,
             'address': contract_address,
             'topics': [event_topic]
         })
@@ -85,7 +89,7 @@ def scan_blocks(chain, start_block, end_block, contract_address, eventfile='depo
             # Decode the raw log into event arguments
             decoded_event = contract.events.Deposit().process_log(log)
             
-            # Format transaction hash to 0x-prefixed hex string
+            # Format transaction hash to guaranteed 0x-prefixed hex string
             tx_hash = decoded_event.transactionHash.hex()
             if not tx_hash.startswith("0x"):
                 tx_hash = "0x" + tx_hash
