@@ -5,7 +5,7 @@ from web3 import Web3
 from web3.providers.rpc import HTTPProvider
 from web3.middleware import ExtraDataToPOAMiddleware
 
-# 备用 BSC Testnet RPC 节点列表
+# 优化后的 BSC Testnet 节点列表（优先使用高并发 publicnode）
 BSC_TESTNET_RPCS = [
     "https://bsc-testnet.publicnode.com",
     "https://data-seed-prebsc-2-s1.binance.org:8545/",
@@ -15,11 +15,11 @@ BSC_TESTNET_RPCS = [
 
 FUJI_RPC = "https://api.avax-test.network/ext/bc/C/rpc"
 
+# 全局去重集合，防止重复处理同一笔交易
+processed_tx_hashes = set()
+
 
 def connect_to(chain, rpc_index=0):
-    """
-    Connect to Avalanche Fuji (source) or BNB Chain Testnet (destination)
-    """
     if chain == 'source':
         w3 = Web3(HTTPProvider(FUJI_RPC))
         w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
@@ -113,26 +113,28 @@ def send_signed_transaction(w3, contract_function, private_key):
     return receipt
 
 
-def get_logs_with_retry(chain, contract, event_name, from_block, to_block):
+def get_events_safely(chain, contract, event_name, from_block, to_block):
     """
-    针对 RPC 限流/报错（如 -32005 limit exceeded）自动切换节点并重试
+    带 RPC 自动切换容错的事件拉取函数
     """
-    for rpc_idx in range(len(BSC_TESTNET_RPCS) if chain == 'destination' else 1):
+    if chain == 'source':
+        w3 = connect_to('source')
+        c = w3.eth.contract(address=contract.address, abi=contract.abi)
+        event_obj = getattr(c.events, event_name)()
+        return w3, event_obj.get_logs(from_block=from_block, to_block=to_block)
+
+    for idx, rpc_url in enumerate(BSC_TESTNET_RPCS):
         try:
-            w3 = connect_to(chain, rpc_idx)
-            contract_instance = w3.eth.contract(
-                address=contract.address,
-                abi=contract.abi
-            )
-            event_obj = getattr(contract_instance.events, event_name)()
+            w3 = connect_to('destination', idx)
+            c = w3.eth.contract(address=contract.address, abi=contract.abi)
+            event_obj = getattr(c.events, event_name)()
             logs = event_obj.get_logs(from_block=from_block, to_block=to_block)
             return w3, logs
-        except Exception as e:
-            print(f"Attempt with RPC index {rpc_idx} failed for {chain} ({e}), retrying next RPC...")
-            time.sleep(0.5)
+        except Exception:
+            continue
 
-    # 兜底返回原连接对象及空列表
-    return connect_to(chain), []
+    w3 = connect_to('destination', 0)
+    return w3, []
 
 
 def scan_blocks(chain, contract_info="contract_info.json"):
@@ -166,11 +168,17 @@ def scan_blocks(chain, contract_info="contract_info.json"):
 
     if chain == 'source':
         latest_block = w3_source.eth.block_number
-        from_block = max(0, latest_block - 4)
+        # 扩展到 50 个区块，确保不会漏掉前面的交易
+        from_block = max(0, latest_block - 50)
 
-        _, deposit_events = get_logs_with_retry('source', source_contract, 'Deposit', from_block, latest_block)
+        w3_source, deposit_events = get_events_safely('source', source_contract, 'Deposit', from_block, latest_block)
 
         for event in deposit_events:
+            tx_hash = event.transactionHash.hex()
+            if tx_hash in processed_tx_hashes:
+                continue
+            processed_tx_hashes.add(tx_hash)
+
             args = event.args
             token = getattr(args, 'token', getattr(args, '_token', None))
             recipient = getattr(args, 'recipient', getattr(args, '_recipient', getattr(args, 'to', None)))
@@ -187,11 +195,17 @@ def scan_blocks(chain, contract_info="contract_info.json"):
 
     elif chain == 'destination':
         latest_block = w3_dest.eth.block_number
-        from_block = max(0, latest_block - 4)
+        # 扩展到 50 个区块，确保抓取所有 Unwrap 事件
+        from_block = max(0, latest_block - 50)
 
-        _, unwrap_events = get_logs_with_retry('destination', dest_contract, 'Unwrap', from_block, latest_block)
+        w3_dest, unwrap_events = get_events_safely('destination', dest_contract, 'Unwrap', from_block, latest_block)
 
         for event in unwrap_events:
+            tx_hash = event.transactionHash.hex()
+            if tx_hash in processed_tx_hashes:
+                continue
+            processed_tx_hashes.add(tx_hash)
+
             args = event.args
             underlying_token = getattr(args, 'underlying_token', getattr(args, '_underlying_token', getattr(args, 'token', None)))
             recipient = getattr(args, 'to', getattr(args, 'recipient', getattr(args, '_recipient', None)))
