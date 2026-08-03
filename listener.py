@@ -13,7 +13,7 @@ def scan_blocks(chain, start_block, end_block, contract_address, eventfile='depo
     end_block - integer or "latest" last block to scan
     contract_address - the address of the deployed contract
 
-    This function reads "Deposit" events using get_logs() to avoid RPC filter limitations.
+    This function reads "Deposit" events using get_logs() with snake_case parameters.
     """
     # 1. Network RPC Configuration
     if chain == 'avax':
@@ -88,13 +88,13 @@ def scan_blocks(chain, start_block, end_block, contract_address, eventfile='depo
             }
             events_list.append(data)
 
-    # 4. Fetch events using get_logs() (Stateless RPC call via eth_getLogs)
+    # 4. Fetch events using get_logs() with snake_case arguments
     if end_block - start_block < 30:
-        events = contract.events.Deposit.get_logs(fromBlock=start_block, toBlock=end_block)
+        events = contract.events.Deposit.get_logs(from_block=start_block, to_block=end_block)
         process_events(events)
     else:
         for block_num in range(start_block, end_block + 1):
-            events = contract.events.Deposit.get_logs(fromBlock=block_num, toBlock=block_num)
+            events = contract.events.Deposit.get_logs(from_block=block_num, to_block=block_num)
             process_events(events)
 
     # 5. Export to deposit_logs.csv
