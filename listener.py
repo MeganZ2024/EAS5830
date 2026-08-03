@@ -13,7 +13,7 @@ def scan_blocks(chain, start_block, end_block, contract_address, eventfile='depo
     end_block - integer or "latest" last block to scan
     contract_address - the address of the deployed contract
 
-    This function reads "Deposit" events using get_logs() with snake_case parameters.
+    Scans specified blocks for "Deposit" events and saves them to deposit_logs.csv.
     """
     # 1. Network RPC Configuration
     if chain == 'avax':
@@ -27,6 +27,9 @@ def scan_blocks(chain, start_block, end_block, contract_address, eventfile='depo
     w3 = Web3(Web3.HTTPProvider(api_url))
     if chain in ['avax', 'bsc']:
         w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
+
+    # Ensure valid checksum address
+    contract_address = Web3.to_checksum_address(contract_address)
 
     # 3. Contract setup
     DEPOSIT_ABI = json.loads(
@@ -44,8 +47,7 @@ def scan_blocks(chain, start_block, end_block, contract_address, eventfile='depo
         ']'
     )
     
-    checksum_contract_address = Web3.to_checksum_address(contract_address)
-    contract = w3.eth.contract(address=checksum_contract_address, abi=DEPOSIT_ABI)
+    contract = w3.eth.contract(address=contract_address, abi=DEPOSIT_ABI)
 
     # Handle "latest" block specifications
     if start_block == "latest":
@@ -66,36 +68,44 @@ def scan_blocks(chain, start_block, end_block, contract_address, eventfile='depo
 
     events_list = []
 
-    # Helper function to parse log entries
-    def process_events(events):
-        for evt in events:
-            # Standardize transaction hash
-            if hasattr(evt.transactionHash, 'hex'):
-                tx_hash = evt.transactionHash.hex()
-            else:
-                tx_hash = str(evt.transactionHash)
+    # Get event topic hash
+    deposit_event_abi = contract.events.Deposit().abi
+    event_topic = w3.keccak(text="Deposit(address,address,uint256)").hex()
 
+    def fetch_and_process_logs(f_block, t_block):
+        # Fetch raw logs via w3.eth.get_logs using RPC-compatible dict parameters
+        raw_logs = w3.eth.get_logs({
+            'fromBlock': f_block,
+            'toBlock': t_block,
+            'address': contract_address,
+            'topics': [event_topic]
+        })
+
+        for log in raw_logs:
+            # Decode the raw log into event arguments
+            decoded_event = contract.events.Deposit().process_log(log)
+            
+            # Format transaction hash to 0x-prefixed hex string
+            tx_hash = decoded_event.transactionHash.hex()
             if not tx_hash.startswith("0x"):
                 tx_hash = "0x" + tx_hash
 
             data = {
                 'chain': chain,
-                'token': evt.args['token'],
-                'recipient': evt.args['recipient'],
-                'amount': evt.args['amount'],
+                'token': decoded_event.args['token'],
+                'recipient': decoded_event.args['recipient'],
+                'amount': decoded_event.args['amount'],
                 'transactionHash': tx_hash,
-                'address': evt.address
+                'address': decoded_event.address
             }
             events_list.append(data)
 
-    # 4. Fetch events using get_logs() with snake_case arguments
+    # 4. Fetch logs across requested block range
     if end_block - start_block < 30:
-        events = contract.events.Deposit.get_logs(from_block=start_block, to_block=end_block)
-        process_events(events)
+        fetch_and_process_logs(start_block, end_block)
     else:
         for block_num in range(start_block, end_block + 1):
-            events = contract.events.Deposit.get_logs(from_block=block_num, to_block=block_num)
-            process_events(events)
+            fetch_and_process_logs(block_num, block_num)
 
     # 5. Export to deposit_logs.csv
     csv_path = Path(eventfile)
@@ -104,11 +114,13 @@ def scan_blocks(chain, start_block, end_block, contract_address, eventfile='depo
     if events_list:
         df = pd.DataFrame(events_list)[headers]
         
+        # Append if file exists and has content; write new file with headers otherwise
         if csv_path.is_file() and csv_path.stat().st_size > 0:
             df.to_csv(eventfile, mode='a', index=False, header=False)
         else:
             df.to_csv(eventfile, mode='w', index=False, header=True)
     else:
+        # Create empty template CSV with headers if no events found and file doesn't exist
         if not csv_path.is_file() or csv_path.stat().st_size == 0:
             empty_df = pd.DataFrame(columns=headers)
             empty_df.to_csv(eventfile, index=False)
