@@ -1,16 +1,16 @@
+import json
+from pathlib import Path
+import pandas as pd
 from web3 import Web3
 from web3.providers.rpc import HTTPProvider
 from web3.middleware import ExtraDataToPOAMiddleware
-from pathlib import Path
-import json
-import pandas as pd
 
 
 def scan_blocks(chain, start_block, end_block, contract_address, eventfile='deposit_logs.csv'):
     """
-    chain - string (Either 'bsc' or 'avax')
-    start_block - integer/string or "latest" first block to scan
-    end_block - integer/string or "latest" last block to scan
+    chain - string (Either 'bsc', 'avax' or custom RPC URL)
+    start_block - integer/string or "latest"
+    end_block - integer/string or "latest"
     contract_address - the address of the deployed contract
 
     Scans specified blocks for "Deposit" events and saves them to deposit_logs.csv.
@@ -24,11 +24,11 @@ def scan_blocks(chain, start_block, end_block, contract_address, eventfile='depo
         api_url = chain
 
     # 2. Web3 Connection & Middleware setup
-    w3 = Web3(Web3.HTTPProvider(api_url))
+    w3 = Web3(HTTPProvider(api_url))
     if chain in ['avax', 'bsc']:
         w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
 
-    # Ensure valid checksum address (Guarantees 0x prefix)
+    # Ensure valid checksum address
     contract_address = Web3.to_checksum_address(contract_address)
 
     # 3. Contract setup
@@ -46,17 +46,17 @@ def scan_blocks(chain, start_block, end_block, contract_address, eventfile='depo
         '  }'
         ']'
     )
-    
+
     contract = w3.eth.contract(address=contract_address, abi=DEPOSIT_ABI)
 
-    # 4. Strictly handle string-to-int conversion for block parameters
+    # 4. Block range handling
     if start_block == "latest":
-        start_block = w3.eth.get_block_number()
+        start_block = w3.eth.block_number
     else:
-        start_block = int(start_block)  
+        start_block = int(start_block)
 
     if end_block == "latest":
-        end_block = w3.eth.get_block_number()
+        end_block = w3.eth.block_number
     else:
         end_block = int(end_block)
 
@@ -66,56 +66,39 @@ def scan_blocks(chain, start_block, end_block, contract_address, eventfile='depo
 
     events_list = []
 
-    # CRITICAL FIX: Use w3.to_hex() to ensure the 0x prefix is attached to the topic
-    event_topic = w3.to_hex(w3.keccak(text="Deposit(address,address,uint256)"))
+    # 5. Fetch logs safely using chunking (Batch processing)
+    CHUNK_SIZE = 2000  # 每次请求 2000 个区块，防止触发 RPC 限制，且大幅提升速度
+    current_start = start_block
 
-    def fetch_and_process_logs(f_block, t_block):
-        # Web3.py automatically converts integer block parameters to correct 0x hex strings internally
-        raw_logs = w3.eth.get_logs({
-            'fromBlock': f_block,
-            'toBlock': t_block,
-            'address': contract_address,
-            'topics': [event_topic]
-        })
+    while current_start <= end_block:
+        current_end = min(current_start + CHUNK_SIZE - 1, end_block)
 
-        for log in raw_logs:
-            # Decode the raw log into event arguments
-            decoded_event = contract.events.Deposit().process_log(log)
-            
-            # Format transaction hash safely
-            if hasattr(decoded_event.transactionHash, 'hex'):
-                tx_hash = decoded_event.transactionHash.hex()
-            else:
-                tx_hash = str(decoded_event.transactionHash)
+        # 换用 Web3.py 原生 Event 事件监听，无需手动 keccak 计算 Topic 或 process_log
+        events = contract.events.Deposit().get_logs(
+            from_block=current_start,
+            to_block=current_end
+        )
 
-            if not tx_hash.startswith("0x"):
-                tx_hash = "0x" + tx_hash
-
+        for event in events:
             data = {
                 'chain': chain,
-                'token': decoded_event.args['token'],
-                'recipient': decoded_event.args['recipient'],
-                'amount': decoded_event.args['amount'],
-                'transactionHash': tx_hash,
-                'address': decoded_event.address
+                'token': event.args.token,
+                'recipient': event.args.recipient,
+                'amount': event.args.amount,
+                'transactionHash': event.transactionHash.hex(),
+                'address': event.address
             }
             events_list.append(data)
 
-    # 5. Fetch logs safely handling block ranges
-    if end_block - start_block < 30:
-        fetch_and_process_logs(start_block, end_block)
-    else:
-        # Prevent RPC limits by looping one by one for large ranges
-        for block_num in range(start_block, end_block + 1):
-            fetch_and_process_logs(block_num, block_num)
+        current_start = current_end + 1
 
-    # 6. Export to deposit_logs.csv
+    # 6. Export to CSV
     csv_path = Path(eventfile)
     headers = ['chain', 'token', 'recipient', 'amount', 'transactionHash', 'address']
 
     if events_list:
         df = pd.DataFrame(events_list)[headers]
-        
+
         # Append if file exists and has content; write new file with headers otherwise
         if csv_path.is_file() and csv_path.stat().st_size > 0:
             df.to_csv(eventfile, mode='a', index=False, header=False)
