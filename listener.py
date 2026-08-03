@@ -28,7 +28,7 @@ def scan_blocks(chain, start_block, end_block, contract_address, eventfile='depo
     if chain in ['avax', 'bsc']:
         w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
 
-    # Ensure valid checksum address
+    # Ensure valid checksum address (Guarantees 0x prefix)
     contract_address = Web3.to_checksum_address(contract_address)
 
     # 3. Contract setup
@@ -66,21 +66,20 @@ def scan_blocks(chain, start_block, end_block, contract_address, eventfile='depo
 
     events_list = []
 
-    # Get event topic signature hash for low-level fetching
-    event_topic = w3.keccak(text="Deposit(address,address,uint256)").hex()
+    # CRITICAL FIX: Use w3.to_hex() to ensure the 0x prefix is attached to the topic
+    event_topic = w3.to_hex(w3.keccak(text="Deposit(address,address,uint256)"))
 
     def fetch_and_process_logs(f_block, t_block):
-        # Format explicitly as hex strings for the EVM RPC node
-        # This completely avoids the "-32602 invalid argument 0" string error
+        # Web3.py automatically converts integer block parameters to correct 0x hex strings internally
         raw_logs = w3.eth.get_logs({
-            'fromBlock': hex(f_block),
-            'toBlock': hex(t_block),
+            'fromBlock': f_block,
+            'toBlock': t_block,
             'address': contract_address,
             'topics': [event_topic]
         })
 
         for log in raw_logs:
-            # Decode the raw log into event arguments, ignoring strict internal filters
+            # Decode the raw log into event arguments
             decoded_event = contract.events.Deposit().process_log(log)
             
             # Format transaction hash safely
