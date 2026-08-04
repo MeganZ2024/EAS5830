@@ -3,38 +3,33 @@ import os
 import time
 from web3 import Web3
 from web3.providers.rpc import HTTPProvider
-from web3.middleware import ExtraDataToPOAMiddleware
-
-# 优化后的 BSC Testnet 节点列表（优先使用高并发 publicnode）
-BSC_TESTNET_RPCS = [
-    "https://bsc-testnet.publicnode.com",
-    "https://data-seed-prebsc-2-s1.binance.org:8545/",
-    "https://data-seed-prebsc-1-s1.binance.org:8545/",
-    "https://endpoints.omniatech.io/v1/bsc/testnet/public"
-]
+from web3.middleware import ExtraDataToPOAMiddleware  # Necessary for POA chains
 
 FUJI_RPC = "https://api.avax-test.network/ext/bc/C/rpc"
+BSC_RPCS = [
+    "https://bsc-testnet.publicnode.com",
+    "https://data-seed-prebsc-1-s1.binance.org:8545/",
+    "https://data-seed-prebsc-2-s1.binance.org:8545/"
+]
 
-# 全局去重集合，防止重复处理同一笔交易
-processed_tx_hashes = set()
 
-
-def connect_to(chain, rpc_index=0):
+def connect_to(chain):
+    """
+    Connect to Avalanche Fuji (source) or BNB Chain Testnet (destination)
+    """
     if chain == 'source':
-        w3 = Web3(HTTPProvider(FUJI_RPC))
-        w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
-        return w3
-
+        api_url = FUJI_RPC
     elif chain == 'destination':
-        rpc_url = BSC_TESTNET_RPCS[rpc_index % len(BSC_TESTNET_RPCS)]
-        w3 = Web3(HTTPProvider(rpc_url))
-        w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
-        return w3
-
+        api_url = BSC_RPCS[0]  # 默认使用高并发节点
     else:
-        w3 = Web3(HTTPProvider(chain))
+        api_url = chain
+
+    if chain in ['source', 'destination'] or isinstance(chain, str):
+        w3 = Web3(HTTPProvider(api_url))
         w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
         return w3
+    
+    return None
 
 
 def get_contract_info(chain, contract_info_path="contract_info.json"):
@@ -43,7 +38,7 @@ def get_contract_info(chain, contract_info_path="contract_info.json"):
             contracts = json.load(f)
         return contracts[chain]
     except Exception as e:
-        print(f"Failed to read contract info: {e}")
+        print(f"Failed to read contract info\nPlease contact your instructor\n{e}")
         return None
 
 
@@ -86,7 +81,8 @@ def send_signed_transaction(w3, contract_function, private_key):
     nonce = w3.eth.get_transaction_count(sender_address, 'pending')
 
     gas_price = w3.eth.gas_price
-    min_gp = w3.to_wei(25, 'gwei') if ('avax' in w3.provider.endpoint_uri or 'fuji' in w3.provider.endpoint_uri) else w3.to_wei(3, 'gwei')
+    # Fuji 测试网最低需要 25 gwei
+    min_gp = w3.to_wei(25, 'gwei') if 'avax' in w3.provider.endpoint_uri else w3.to_wei(3, 'gwei')
     if gas_price < min_gp:
         gas_price = min_gp
 
@@ -99,9 +95,9 @@ def send_signed_transaction(w3, contract_function, private_key):
 
     try:
         gas_estimate = contract_function.estimate_gas({'from': sender_address})
-        tx_params['gas'] = int(gas_estimate * 1.25)
+        tx_params['gas'] = int(gas_estimate * 1.2)
     except Exception:
-        tx_params['gas'] = 350000
+        tx_params['gas'] = 200000
 
     tx = contract_function.build_transaction(tx_params)
     signed_tx = w3.eth.account.sign_transaction(tx, private_key=private_key)
@@ -113,34 +109,13 @@ def send_signed_transaction(w3, contract_function, private_key):
     return receipt
 
 
-def get_events_safely(chain, contract, event_name, from_block, to_block):
-    """
-    带 RPC 自动切换容错的事件拉取函数
-    """
-    if chain == 'source':
-        w3 = connect_to('source')
-        c = w3.eth.contract(address=contract.address, abi=contract.abi)
-        event_obj = getattr(c.events, event_name)()
-        return w3, event_obj.get_logs(from_block=from_block, to_block=to_block)
-
-    for idx, rpc_url in enumerate(BSC_TESTNET_RPCS):
-        try:
-            w3 = connect_to('destination', idx)
-            c = w3.eth.contract(address=contract.address, abi=contract.abi)
-            event_obj = getattr(c.events, event_name)()
-            logs = event_obj.get_logs(from_block=from_block, to_block=to_block)
-            return w3, logs
-        except Exception:
-            continue
-
-    w3 = connect_to('destination', 0)
-    return w3, []
-
-
 def scan_blocks(chain, contract_info="contract_info.json"):
     if chain not in ['source', 'destination']:
         print(f"Invalid chain: {chain}")
         return 0
+
+    w3_source = connect_to('source')
+    w3_dest = connect_to('destination')
 
     source_info = get_contract_info('source', contract_info)
     dest_info = get_contract_info('destination', contract_info)
@@ -148,9 +123,6 @@ def scan_blocks(chain, contract_info="contract_info.json"):
     if not source_info or not dest_info:
         print("Error: Could not load contract information.")
         return 0
-
-    w3_source = connect_to('source')
-    w3_dest = connect_to('destination')
 
     source_contract = w3_source.eth.contract(
         address=Web3.to_checksum_address(source_info['address']),
@@ -168,21 +140,17 @@ def scan_blocks(chain, contract_info="contract_info.json"):
 
     if chain == 'source':
         latest_block = w3_source.eth.block_number
-        # 扩展到 50 个区块，确保不会漏掉前面的交易
-        from_block = max(0, latest_block - 50)
+        from_block = max(0, latest_block - 20)  # 从 4 扩大到 20，防止漏单
 
-        w3_source, deposit_events = get_events_safely('source', source_contract, 'Deposit', from_block, latest_block)
+        deposit_events = source_contract.events.Deposit().get_logs(
+            from_block=from_block,
+            to_block=latest_block
+        )
 
         for event in deposit_events:
-            tx_hash = event.transactionHash.hex()
-            if tx_hash in processed_tx_hashes:
-                continue
-            processed_tx_hashes.add(tx_hash)
-
-            args = event.args
-            token = getattr(args, 'token', getattr(args, '_token', None))
-            recipient = getattr(args, 'recipient', getattr(args, '_recipient', getattr(args, 'to', None)))
-            amount = getattr(args, 'amount', getattr(args, '_amount', None))
+            token = event.args.token
+            recipient = event.args.recipient
+            amount = event.args.amount
 
             print(f"[Source Event Captured] Deposit: token={token}, recipient={recipient}, amount={amount}")
 
@@ -195,21 +163,31 @@ def scan_blocks(chain, contract_info="contract_info.json"):
 
     elif chain == 'destination':
         latest_block = w3_dest.eth.block_number
-        # 扩展到 50 个区块，确保抓取所有 Unwrap 事件
-        from_block = max(0, latest_block - 50)
+        from_block = max(0, latest_block - 20)  # 从 4 扩大到 20，防止漏单
 
-        w3_dest, unwrap_events = get_events_safely('destination', dest_contract, 'Unwrap', from_block, latest_block)
+        # 使用 try-except 容错机制抓取 Unwrap
+        try:
+            unwrap_events = dest_contract.events.Unwrap().get_logs(
+                from_block=from_block,
+                to_block=latest_block
+            )
+        except Exception:
+            # 如果默认节点报错，用备用 BSC 节点再试一次
+            w3_dest_alt = Web3(HTTPProvider(BSC_RPCS[1]))
+            w3_dest_alt.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
+            dest_contract_alt = w3_dest_alt.eth.contract(
+                address=Web3.to_checksum_address(dest_info['address']),
+                abi=dest_info['abi']
+            )
+            unwrap_events = dest_contract_alt.events.Unwrap().get_logs(
+                from_block=from_block,
+                to_block=latest_block
+            )
 
         for event in unwrap_events:
-            tx_hash = event.transactionHash.hex()
-            if tx_hash in processed_tx_hashes:
-                continue
-            processed_tx_hashes.add(tx_hash)
-
-            args = event.args
-            underlying_token = getattr(args, 'underlying_token', getattr(args, '_underlying_token', getattr(args, 'token', None)))
-            recipient = getattr(args, 'to', getattr(args, 'recipient', getattr(args, '_recipient', None)))
-            amount = getattr(args, 'amount', getattr(args, '_amount', None))
+            underlying_token = event.args.underlying_token
+            recipient = event.args.to
+            amount = event.args.amount
 
             print(f"[Destination Event Captured] Unwrap: underlying_token={underlying_token}, recipient={recipient}, amount={amount}")
 
